@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Upload, TrendingUp, TrendingDown, FileSpreadsheet, DollarSign, PieChart, Loader2, Sparkles, Lightbulb, TriangleAlert, FileText, ArrowDownToLine, ShoppingCart, Percent, Calculator, ListTree, ShoppingBag, ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
+import { Upload, TrendingUp, TrendingDown, FileSpreadsheet, DollarSign, PieChart, Loader2, Sparkles, Lightbulb, TriangleAlert, FileText, ArrowDownToLine, ShoppingCart, Percent, Calculator, ListTree, ShoppingBag, ChevronDown, ChevronUp, Plus, Trash2, Filter } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
 import { DashboardNavbar } from "@/components/DashboardNavbar";
 import {
@@ -89,6 +89,18 @@ const extractSubId = (row: any, subKeys: any) => {
     return "(no-subid)";
 };
 
+// Detect channel from SubID
+const detectChannel = (subId: string): string => {
+    if (!subId || subId === "(no-subid)") return "Others";
+    const lower = subId.toLowerCase();
+
+    if (lower.includes("fb") || lower.includes("facebook")) return "Facebook";
+    if (lower.includes("line")) return "Line";
+    if (lower.includes("shopee") || lower.includes("video")) return "Shopeevideo-Shopee";
+
+    return "Others";
+};
+
 // --- Default mappings for Shopee Affiliate (TH) ---------------------------
 const DEFAULT_KEYS = {
     netCommission: "ค่าคอมมิชชั่นสุทธิ(฿)",
@@ -112,6 +124,10 @@ export default function AffiliateRoiDashboard() {
     const [filterStatus, setFilterStatus] = useState("ทั้งหมด");
     // Move activeTab state here to be at the top level
     const [activeTab, setActiveTab] = useState("kpi");
+
+    // Channel and Status filters
+    const [channelFilters, setChannelFilters] = useState<string[]>([]);
+    const [statusFilters, setStatusFilters] = useState<string[]>([]);
 
     const fileRef = useRef<HTMLInputElement>(null);
 
@@ -221,14 +237,40 @@ export default function AffiliateRoiDashboard() {
             modelId: (r[modelId] ?? "").toString().trim(),
             quantity: toNumber(r[quantity]), // Parse quantity
             subid: extractSubId(r, subIds),
+            channel: detectChannel(extractSubId(r, subIds)), // Add channel detection
             _raw: r,
         }));
     }, [rawRows, map]);
 
     const filtered = useMemo(() => {
-        if (filterStatus === "ทั้งหมด") return rows;
-        return rows.filter((r) => r.orderStatus === filterStatus);
-    }, [rows, filterStatus]);
+        let result = rows;
+
+        // Apply status filter (existing logic)
+        if (filterStatus !== "ทั้งหมด") {
+            result = result.filter((r) => r.orderStatus === filterStatus);
+        }
+
+        // Apply channel filters
+        if (channelFilters.length > 0) {
+            result = result.filter((r) => channelFilters.includes(r.channel));
+        }
+
+        // Apply affiliate product status filters
+        if (statusFilters.length > 0) {
+            result = result.filter((r) => {
+                const status = r.orderStatus;
+                return statusFilters.some(filter => {
+                    if (filter === "ยกเลิก") return status.includes("ยกเลิก");
+                    if (filter === "ยังไม่ชำระเงิน") return status.includes("ยังไม่ชำระเงิน");
+                    if (filter === "รอดำเนินการ") return status.includes("รอดำเนินการ");
+                    if (filter === "สำเร็จ") return status.includes("สำเร็จ") || status.includes("สำเร็จแล้ว") || status.includes("สำเร็จสมบูรณ์");
+                    return false;
+                });
+            });
+        }
+
+        return result;
+    }, [rows, filterStatus, channelFilters, statusFilters]);
 
     // New Memoized variable for date range
     const dateRange = useMemo(() => {
@@ -813,6 +855,144 @@ export default function AffiliateRoiDashboard() {
         );
     };
 
+    const FilterSection = () => {
+        const channelOptions = ["Facebook", "Line", "Others", "Shopeevideo-Shopee"];
+        const statusOptions = ["ยกเลิก", "ยังไม่ชำระเงิน", "รอดำเนินการ", "สำเร็จ"];
+
+        const toggleChannelFilter = (channel: string) => {
+            setChannelFilters(prev =>
+                prev.includes(channel)
+                    ? prev.filter(c => c !== channel)
+                    : [...prev, channel]
+            );
+        };
+
+        const toggleStatusFilter = (status: string) => {
+            setStatusFilters(prev =>
+                prev.includes(status)
+                    ? prev.filter(s => s !== status)
+                    : [...prev, status]
+            );
+        };
+
+        // Get counts for each filter option
+        const getChannelCount = (channel: string) => {
+            return rows.filter(r => r.channel === channel).length;
+        };
+
+        const getStatusCount = (status: string) => {
+            return rows.filter(r => {
+                const orderStatus = r.orderStatus;
+                if (status === "ยกเลิก") return orderStatus.includes("ยกเลิก");
+                if (status === "ยังไม่ชำระเงิน") return orderStatus.includes("ยังไม่ชำระเงิน");
+                if (status === "รอดำเนินการ") return orderStatus.includes("รอดำเนินการ");
+                if (status === "สำเร็จ") return orderStatus.includes("สำเร็จ") || orderStatus.includes("สำเร็จแล้ว") || orderStatus.includes("สำเร็จสมบูรณ์");
+                return false;
+            }).length;
+        };
+
+        return (
+            <div className="flex flex-wrap items-center gap-3 mb-6">
+                {/* Channel Filter */}
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button
+                            variant="outline"
+                            className="rounded-lg gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                        >
+                            <Filter className="w-4 h-4" />
+                            ช่องทาง
+                            {channelFilters.length > 0 && (
+                                <Badge className="ml-1 bg-blue-600 text-white">
+                                    {channelFilters.length}
+                                </Badge>
+                            )}
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                        <div className="space-y-2">
+                            {channelOptions.map(channel => (
+                                <label
+                                    key={channel}
+                                    className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={channelFilters.includes(channel)}
+                                        onChange={() => toggleChannelFilter(channel)}
+                                        className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                        {channel}
+                                    </span>
+                                    <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                        {getChannelCount(channel)}
+                                    </Badge>
+                                </label>
+                            ))}
+                        </div>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+
+                {/* Status Filter */}
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button
+                            variant="outline"
+                            className="rounded-lg gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                        >
+                            <Filter className="w-4 h-4" />
+                            สถานะสินค้า Affiliate
+                            {statusFilters.length > 0 && (
+                                <Badge className="ml-1 bg-blue-600 text-white">
+                                    {statusFilters.length}
+                                </Badge>
+                            )}
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                        <div className="space-y-2">
+                            {statusOptions.map(status => (
+                                <label
+                                    key={status}
+                                    className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={statusFilters.includes(status)}
+                                        onChange={() => toggleStatusFilter(status)}
+                                        className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                        {status}
+                                    </span>
+                                    <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                        {getStatusCount(status)}
+                                    </Badge>
+                                </label>
+                            ))}
+                        </div>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+
+                {/* Clear Filters Button */}
+                {(channelFilters.length > 0 || statusFilters.length > 0) && (
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                            setChannelFilters([]);
+                            setStatusFilters([]);
+                        }}
+                        className="text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                    >
+                        ล้างฟิลเตอร์ทั้งหมด
+                    </Button>
+                )}
+            </div>
+        );
+    };
+
     const KpiSection = () => {
         return (
             <div className="space-y-4">
@@ -1056,6 +1236,7 @@ export default function AffiliateRoiDashboard() {
                                 </TabsContent>
 
                                 <TabsContent value="kpi" className="pt-4">
+                                    <FilterSection />
                                     <KpiSection />
                                 </TabsContent>
 
