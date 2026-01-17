@@ -89,16 +89,63 @@ const extractSubId = (row: any, subKeys: any) => {
     return "(no-subid)";
 };
 
-// Detect channel from SubID
-const detectChannel = (subId: string): string => {
-    if (!subId || subId === "(no-subid)") return "Others";
-    const lower = subId.toLowerCase();
-
-    if (lower.includes("fb") || lower.includes("facebook")) return "Facebook";
-    if (lower.includes("line")) return "Line";
-    if (lower.includes("shopee") || lower.includes("video")) return "Shopeevideo-Shopee";
-
+// Extract channel from row data
+const extractChannel = (row: any, channelKey: string): string => {
+    const channel = row[channelKey];
+    if (channel && String(channel).trim()) {
+        return String(channel).trim();
+    }
     return "Others";
+};
+
+// --- IndexedDB helpers for large data storage -----------------------------
+const DB_NAME = "AffiliateROI";
+const DB_VERSION = 1;
+const STORE_NAME = "data";
+
+const openDB = (): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = (event: any) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+            }
+        };
+    });
+};
+
+const saveToIndexedDB = async (key: string, value: any): Promise<void> => {
+    try {
+        const db = await openDB();
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        store.put(value, key);
+        return new Promise((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) {
+        console.error("Failed to save to IndexedDB:", e);
+    }
+};
+
+const loadFromIndexedDB = async (key: string): Promise<any> => {
+    try {
+        const db = await openDB();
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.get(key);
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    } catch (e) {
+        console.error("Failed to load from IndexedDB:", e);
+        return null;
+    }
 };
 
 // --- Default mappings for Shopee Affiliate (TH) ---------------------------
@@ -110,7 +157,8 @@ const DEFAULT_KEYS = {
     overallOrderCommission: "มูลค่าซื้อ(฿)",
     orderId: "รหัสการสั่งซื้อ",
     modelId: "เลขที่ โมเดล",
-    quantity: "จำนวน", // Added quantity column
+    quantity: "จำนวน",
+    channel: "ช่องทาง", // Channel column
     subIds: ["Sub_id1", "Sub_id2", "Sub_id3", "Sub_id4", "Sub_id5"],
 };
 
@@ -167,27 +215,46 @@ export default function AffiliateRoiDashboard() {
         });
     }, []);
 
-    // 1. Load data from LocalStorage on mount
+    // 1. Load saved data from IndexedDB and settings from localStorage on mount
     useEffect(() => {
-        const savedData = localStorage.getItem("aff_raw_rows");
-        if (savedData) {
+        const loadData = async () => {
+            // Clean up old localStorage data (migrated to IndexedDB)
             try {
-                const parsed = JSON.parse(savedData);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    setRawRows(parsed);
-                }
+                localStorage.removeItem("aff_raw_rows");
             } catch (e) {
-                console.error("Failed to parse saved data", e);
+                console.error("Failed to clean up old localStorage data", e);
             }
-        }
 
-        // Load other incomes
-        const savedIncomes = localStorage.getItem("aff_other_incomes");
-        if (savedIncomes) {
-            try {
-                setOtherIncomes(JSON.parse(savedIncomes));
-            } catch (e) { console.error(e); }
-        }
+            // Load raw rows from IndexedDB (supports large data)
+            const savedRawRows = await loadFromIndexedDB("aff_raw_rows");
+            if (savedRawRows && Array.isArray(savedRawRows) && savedRawRows.length > 0) {
+                setRawRows(savedRawRows);
+            }
+
+            // Load spend data from localStorage
+            const savedSpend = localStorage.getItem("aff_spend_by_sub");
+            if (savedSpend) {
+                try {
+                    setSpendBySub(JSON.parse(savedSpend));
+                } catch (e) { console.error(e); }
+            }
+
+            // Load other incomes from localStorage
+            const savedIncomes = localStorage.getItem("aff_other_incomes");
+            if (savedIncomes) {
+                try {
+                    setOtherIncomes(JSON.parse(savedIncomes));
+                } catch (e) { console.error(e); }
+            }
+
+            // Load total ad spend from localStorage
+            const savedTotalSpend = localStorage.getItem("aff_total_ad_spend");
+            if (savedTotalSpend) {
+                setTotalAdSpend(savedTotalSpend);
+            }
+        };
+
+        loadData();
     }, []);
 
     // Save other incomes whenever they change
@@ -195,7 +262,7 @@ export default function AffiliateRoiDashboard() {
         localStorage.setItem("aff_other_incomes", JSON.stringify(otherIncomes));
     }, [otherIncomes]);
 
-    // 2. Parse CSV/Excel client-side & Save to LocalStorage
+    // 2. Parse CSV/Excel client-side and save to IndexedDB
     const handleFile = async (file: File | undefined) => {
         if (!file) return;
         const ext = file.name.toLowerCase().split(".").pop();
@@ -203,9 +270,10 @@ export default function AffiliateRoiDashboard() {
             window.Papa.parse(file, {
                 header: true,
                 skipEmptyLines: true,
-                complete: (r: any) => {
+                complete: async (r: any) => {
                     setRawRows(r.data);
-                    localStorage.setItem("aff_raw_rows", JSON.stringify(r.data)); // Save
+                    // Save to IndexedDB (supports large data)
+                    await saveToIndexedDB("aff_raw_rows", r.data);
                     setActiveTab("kpi");
                 },
             });
@@ -215,7 +283,8 @@ export default function AffiliateRoiDashboard() {
             const ws = wb.Sheets[wb.SheetNames[0]];
             const json = window.XLSX.utils.sheet_to_json(ws, { defval: "" });
             setRawRows(json);
-            localStorage.setItem("aff_raw_rows", JSON.stringify(json)); // Save
+            // Save to IndexedDB (supports large data)
+            await saveToIndexedDB("aff_raw_rows", json);
             setActiveTab("kpi");
         } else {
             console.log("Unsupported file type or libraries not loaded.");
@@ -225,7 +294,7 @@ export default function AffiliateRoiDashboard() {
     // Normalize rows to unified shape
     const rows = useMemo(() => {
         if (!rawRows?.length) return [];
-        const { netCommission, orderStatus, orderTime, productName, overallOrderCommission, orderId, subIds, modelId, quantity } = map;
+        const { netCommission, orderStatus, orderTime, productName, overallOrderCommission, orderId, subIds, modelId, quantity, channel } = map;
         return rawRows.map((r) => ({
             netCommission: toNumber(r[netCommission]),
             orderStatus: (r[orderStatus] ?? "").toString().trim(),
@@ -235,9 +304,9 @@ export default function AffiliateRoiDashboard() {
             overallOrderCommission: toNumber(r[overallOrderCommission]),
             orderId: (r[orderId] ?? "").toString().trim(),
             modelId: (r[modelId] ?? "").toString().trim(),
-            quantity: toNumber(r[quantity]), // Parse quantity
+            quantity: toNumber(r[quantity]),
             subid: extractSubId(r, subIds),
-            channel: detectChannel(extractSubId(r, subIds)), // Add channel detection
+            channel: extractChannel(r, channel), // Read channel from column
             _raw: r,
         }));
     }, [rawRows, map]);
@@ -267,6 +336,15 @@ export default function AffiliateRoiDashboard() {
                     return false;
                 });
             });
+        } else {
+            // Default: only show "รอดำเนินการ" and "สำเร็จ" (exclude "ยกเลิก" and "ยังไม่ชำระเงิน")
+            result = result.filter((r) => {
+                const status = r.orderStatus;
+                return status.includes("รอดำเนินการ") ||
+                    status.includes("สำเร็จ") ||
+                    status.includes("สำเร็จแล้ว") ||
+                    status.includes("สำเร็จสมบูรณ์");
+            });
         }
 
         return result;
@@ -295,12 +373,12 @@ export default function AffiliateRoiDashboard() {
 
         const totalGMV = filtered.reduce((s, r) => s + r.overallOrderCommission, 0);
         const avgCommissionRate = totalGMV > 0 ? totalCommission / totalGMV : 0;
-        const pending = filtered.filter((r) => r.orderStatus.includes("รอดำเนินการ")).length;
-        const approved = filtered.filter((r) => r.orderStatus.includes("สำเร็จ") || r.orderStatus.includes("สำเร็จแล้ว") || r.orderStatus.includes("สำเร็จสมบูรณ์")).length;
-        const rejected = filtered.filter((r) => r.orderStatus.includes("ยกเลิก") || r.orderStatus.includes("ปฏิเสธ")).length;
+        const pending = rows.filter((r) => r.orderStatus.includes("รอดำเนินการ")).length;
+        const approved = rows.filter((r) => r.orderStatus.includes("สำเร็จ") || r.orderStatus.includes("สำเร็จแล้ว") || r.orderStatus.includes("สำเร็จสมบูรณ์")).length;
+        const rejected = rows.filter((r) => r.orderStatus.includes("ยกเลิก") || r.orderStatus.includes("ปฏิเสธ")).length;
         const avgPerOrder = totalOrders ? totalCommission / totalOrders : 0;
         return { totalCommission, totalOrders, avgPerOrder, pending, approved, rejected, totalGMV, avgCommissionRate };
-    }, [filtered]);
+    }, [filtered, rows]);
 
     const byDate = useMemo(() => {
         const map = new Map();
@@ -625,10 +703,15 @@ export default function AffiliateRoiDashboard() {
     };
 
     const handleUpdateSpend = (subId: any, ad: any, other: any) => {
-        setSpendBySub((s: any) => ({
-            ...s,
-            [subId]: { ad: toNumber(ad), other: toNumber(other) }
-        }));
+        setSpendBySub((s: any) => {
+            const updated = {
+                ...s,
+                [subId]: { ad: toNumber(ad), other: toNumber(other) }
+            };
+            // Save to localStorage
+            localStorage.setItem("aff_spend_by_sub", JSON.stringify(updated));
+            return updated;
+        });
     };
 
     // New component to manage the total ad spend input state locally
@@ -643,6 +726,8 @@ export default function AffiliateRoiDashboard() {
 
         const handleBlur = () => {
             onChange(localValue);
+            // Save to localStorage
+            localStorage.setItem("aff_total_ad_spend", localValue);
         };
 
         return (
@@ -857,7 +942,7 @@ export default function AffiliateRoiDashboard() {
 
     const FilterSection = () => {
         const channelOptions = ["Facebook", "Line", "Others", "Shopeevideo-Shopee"];
-        const statusOptions = ["ยกเลิก", "ยังไม่ชำระเงิน", "รอดำเนินการ", "สำเร็จ"];
+        const statusOptions = ["รอดำเนินการ", "สำเร็จ"];
 
         const toggleChannelFilter = (channel: string) => {
             setChannelFilters(prev =>
@@ -1194,7 +1279,134 @@ export default function AffiliateRoiDashboard() {
                             อัพโหลดไฟล์รายงานจาก Shopee Affiliate (.csv/.xlsx) เพื่อคำนวณกำไร & ROI ตาม SubID
                         </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {/* Channel Filter */}
+                        {rawRows.length > 0 && (
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        className="rounded-full gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                                    >
+                                        <Filter className="w-4 h-4" />
+                                        ช่องทาง
+                                        {channelFilters.length > 0 && (
+                                            <Badge className="ml-1 bg-blue-600 text-white">
+                                                {channelFilters.length}
+                                            </Badge>
+                                        )}
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                                    <div className="space-y-2">
+                                        {["Facebook", "Line", "Others", "Shopeevideo-Shopee"].map(channel => {
+                                            const count = rows.filter(r => r.channel === channel).length;
+                                            return (
+                                                <label
+                                                    key={channel}
+                                                    className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={channelFilters.includes(channel)}
+                                                        onChange={() => {
+                                                            setChannelFilters(prev =>
+                                                                prev.includes(channel)
+                                                                    ? prev.filter(c => c !== channel)
+                                                                    : [...prev, channel]
+                                                            );
+                                                        }}
+                                                        className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                                    />
+                                                    <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                                        {channel}
+                                                    </span>
+                                                    <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                                        {count}
+                                                    </Badge>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        )}
+
+                        {/* Status Filter */}
+                        {rawRows.length > 0 && (
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        className="rounded-full gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                                    >
+                                        <Filter className="w-4 h-4" />
+                                        สถานะสินค้า Affiliate
+                                        {statusFilters.length > 0 && (
+                                            <Badge className="ml-1 bg-blue-600 text-white">
+                                                {statusFilters.length}
+                                            </Badge>
+                                        )}
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                                    <div className="space-y-2">
+                                        {["รอดำเนินการ", "สำเร็จ"].map(status => {
+                                            const count = rows.filter(r => {
+                                                const orderStatus = r.orderStatus;
+                                                if (status === "ยกเลิก") return orderStatus.includes("ยกเลิก");
+                                                if (status === "ยังไม่ชำระเงิน") return orderStatus.includes("ยังไม่ชำระเงิน");
+                                                if (status === "รอดำเนินการ") return orderStatus.includes("รอดำเนินการ");
+                                                if (status === "สำเร็จ") return orderStatus.includes("สำเร็จ") || orderStatus.includes("สำเร็จแล้ว") || orderStatus.includes("สำเร็จสมบูรณ์");
+                                                return false;
+                                            }).length;
+                                            return (
+                                                <label
+                                                    key={status}
+                                                    className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={statusFilters.includes(status)}
+                                                        onChange={() => {
+                                                            setStatusFilters(prev =>
+                                                                prev.includes(status)
+                                                                    ? prev.filter(s => s !== status)
+                                                                    : [...prev, status]
+                                                            );
+                                                        }}
+                                                        className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                                    />
+                                                    <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                                        {status}
+                                                    </span>
+                                                    <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                                        {count}
+                                                    </Badge>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        )}
+
+                        {/* Clear Filters Button */}
+                        {(channelFilters.length > 0 || statusFilters.length > 0) && (
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                    setChannelFilters([]);
+                                    setStatusFilters([]);
+                                }}
+                                className="rounded-full text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                            >
+                                ล้างฟิลเตอร์
+                            </Button>
+                        )}
+
+                        {/* Reset Button */}
                         <Button
                             variant="secondary"
                             className="rounded-full gap-2 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 shadow-sm transition-all"
@@ -1236,7 +1448,6 @@ export default function AffiliateRoiDashboard() {
                                 </TabsContent>
 
                                 <TabsContent value="kpi" className="pt-4">
-                                    <FilterSection />
                                     <KpiSection />
                                 </TabsContent>
 

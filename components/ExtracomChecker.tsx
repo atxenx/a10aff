@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Upload, ArrowDownToLine, Package, Percent, DollarSign, ShoppingBag, FileSpreadsheet, Loader2, Sparkles, Target, Search } from "lucide-react";
+import { Upload, ArrowDownToLine, Package, Percent, DollarSign, ShoppingBag, FileSpreadsheet, Loader2, Sparkles, Target, Search, Filter } from "lucide-react";
 import { DashboardNavbar } from "@/components/DashboardNavbar";
 import {
     Dialog,
@@ -17,6 +17,11 @@ import {
     DialogTrigger,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 declare global {
     interface Window {
@@ -61,6 +66,66 @@ const DEFAULT_KEYS = {
     purchaseValue: "มูลค่าซื้อ(฿)",
     modelId: "เลขที่ โมเดล",
     orderId: "รหัสการสั่งซื้อ",
+    channel: "ช่องทาง", // Channel column
+};
+
+// Extract channel from row data
+const extractChannel = (row: any, channelKey: string): string => {
+    const channel = row[channelKey];
+    if (channel && String(channel).trim()) {
+        return String(channel).trim();
+    }
+    return "Others";
+};
+
+// --- IndexedDB helpers for large data storage -----------------------------
+const DB_NAME = "AffiliateROI";
+const DB_VERSION = 1;
+const STORE_NAME = "data";
+
+const openDB = (): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = (event: any) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+            }
+        };
+    });
+};
+
+const saveToIndexedDB = async (key: string, value: any): Promise<void> => {
+    try {
+        const db = await openDB();
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        store.put(value, key);
+        return new Promise((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) {
+        console.error("Failed to save to IndexedDB:", e);
+    }
+};
+
+const loadFromIndexedDB = async (key: string): Promise<any> => {
+    try {
+        const db = await openDB();
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.get(key);
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    } catch (e) {
+        console.error("Failed to load from IndexedDB:", e);
+        return null;
+    }
 };
 
 // --- Main Component --------------------------------------------------------
@@ -71,6 +136,8 @@ export default function ExtracomChecker() {
     const [extracomGoals, setExtracomGoals] = useState<number[]>([]);
     const [goalInput, setGoalInput] = useState<string>("");
     const [searchQuery, setSearchQuery] = useState<string>("");
+    const [channelFilters, setChannelFilters] = useState<string[]>([]);
+    const [statusFilters, setStatusFilters] = useState<string[]>([]);
 
     const fileRef = useRef<HTMLInputElement>(null);
 
@@ -104,36 +171,34 @@ export default function ExtracomChecker() {
         });
     }, []);
 
-    // 1. Load data from LocalStorage on mount (using same key as main dashboard)
+    // 1. Load data from IndexedDB on mount (using same key as main dashboard)
     useEffect(() => {
-        const savedData = localStorage.getItem("aff_raw_rows");
-        if (savedData) {
-            try {
-                const parsed = JSON.parse(savedData);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    setRawRows(parsed);
-                }
-            } catch (e) {
-                console.error("Failed to parse saved data", e);
+        const loadData = async () => {
+            // Load raw rows from IndexedDB (supports large data)
+            const savedRawRows = await loadFromIndexedDB("aff_raw_rows");
+            if (savedRawRows && Array.isArray(savedRawRows) && savedRawRows.length > 0) {
+                setRawRows(savedRawRows);
             }
-        }
 
-        // Load extracom goals (multiple milestones)
-        const savedGoals = localStorage.getItem("extracom_goals");
-        if (savedGoals) {
-            try {
-                const goals = JSON.parse(savedGoals);
-                if (Array.isArray(goals) && goals.length > 0) {
-                    setExtracomGoals(goals);
-                    setGoalInput(goals[goals.length - 1].toString());
+            // Load extracom goals from localStorage (small data)
+            const savedGoals = localStorage.getItem("extracom_goals");
+            if (savedGoals) {
+                try {
+                    const goals = JSON.parse(savedGoals);
+                    if (Array.isArray(goals) && goals.length > 0) {
+                        setExtracomGoals(goals);
+                        setGoalInput(goals[goals.length - 1].toString());
+                    }
+                } catch (e) {
+                    console.error("Failed to parse goals", e);
                 }
-            } catch (e) {
-                console.error("Failed to parse goals", e);
             }
-        }
+        };
+
+        loadData();
     }, []);
 
-    // 2. Parse CSV/Excel client-side & Save to LocalStorage (using same key as main dashboard)
+    // 2. Parse CSV/Excel client-side & Save to IndexedDB (using same key as main dashboard)
     const handleFile = async (file: File | undefined) => {
         if (!file) return;
         const ext = file.name.toLowerCase().split(".").pop();
@@ -141,9 +206,10 @@ export default function ExtracomChecker() {
             window.Papa.parse(file, {
                 header: true,
                 skipEmptyLines: true,
-                complete: (r: any) => {
+                complete: async (r: any) => {
                     setRawRows(r.data);
-                    localStorage.setItem("aff_raw_rows", JSON.stringify(r.data));
+                    // Save to IndexedDB (supports large data)
+                    await saveToIndexedDB("aff_raw_rows", r.data);
                 },
             });
         } else if (["xls", "xlsx"].includes(ext || "") && window.XLSX && window.XLSX.read) {
@@ -152,7 +218,8 @@ export default function ExtracomChecker() {
             const ws = wb.Sheets[wb.SheetNames[0]];
             const json = window.XLSX.utils.sheet_to_json(ws, { defval: "" });
             setRawRows(json);
-            localStorage.setItem("aff_raw_rows", JSON.stringify(json));
+            // Save to IndexedDB (supports large data)
+            await saveToIndexedDB("aff_raw_rows", json);
         } else {
             console.log("Unsupported file type or libraries not loaded.");
         }
@@ -170,7 +237,8 @@ export default function ExtracomChecker() {
             shopeeCommissionRate,
             purchaseValue,
             modelId,
-            orderId
+            orderId,
+            channel
         } = map;
 
         return rawRows
@@ -189,33 +257,68 @@ export default function ExtracomChecker() {
                     purchaseValue: toNumber(r[purchaseValue]),
                     modelId: (r[modelId] ?? "").toString().trim(),
                     orderId: (r[orderId] ?? "").toString().trim(),
+                    channel: extractChannel(r, channel), // Read channel from column
+                    orderStatus: (r["สถานะการสั่งซื้อ"] ?? r["สถานะสินค้า Affiliate"] ?? "").toString().trim(),
                     _raw: r,
                 };
             })
             .filter((r) => r.sellerCommission > 0); // Filter: Only Extracom products
     }, [rawRows, map]);
 
-    // Filtered products based on search query
+    // Filtered products based on search query, channel filters, and status filters
     const filteredProducts = useMemo(() => {
-        if (!searchQuery.trim()) return extracomProducts;
+        let result = extracomProducts;
 
-        const query = searchQuery.toLowerCase();
-        return extracomProducts.filter(product =>
-            product.productName.toLowerCase().includes(query)
-        );
-    }, [extracomProducts, searchQuery]);
+        // Apply search filter
+        if (searchQuery.trim()) {
+            const query = searchQuery.toLowerCase();
+            result = result.filter(product =>
+                product.productName.toLowerCase().includes(query)
+            );
+        }
 
-    // Statistics (based on ALL extracom products, not filtered)
+        // Apply channel filters
+        if (channelFilters.length > 0) {
+            result = result.filter(product => channelFilters.includes(product.channel));
+        }
+
+        // Apply status filters
+        if (statusFilters.length > 0) {
+            result = result.filter(product => {
+                const status = product.orderStatus;
+                return statusFilters.some(filter => {
+                    if (filter === "ยกเลิก") return status.includes("ยกเลิก");
+                    if (filter === "ยังไม่ชำระเงิน") return status.includes("ยังไม่ชำระเงิน");
+                    if (filter === "รอดำเนินการ") return status.includes("รอดำเนินการ");
+                    if (filter === "สำเร็จ") return status.includes("สำเร็จ") || status.includes("สำเร็จแล้ว") || status.includes("สำเร็จสมบูรณ์");
+                    return false;
+                });
+            });
+        } else {
+            // Default: only show "รอดำเนินการ" and "สำเร็จ" (exclude "ยกเลิก" and "ยังไม่ชำระเงิน")
+            result = result.filter(product => {
+                const status = product.orderStatus;
+                return status.includes("รอดำเนินการ") ||
+                    status.includes("สำเร็จ") ||
+                    status.includes("สำเร็จแล้ว") ||
+                    status.includes("สำเร็จสมบูรณ์");
+            });
+        }
+
+        return result;
+    }, [extracomProducts, searchQuery, channelFilters, statusFilters]);
+
+    // Statistics (based on filtered products to reflect selected filters)
     const stats = useMemo(() => {
-        const totalItems = extracomProducts.length;
-        const totalCommission = extracomProducts.reduce((s, r) => s + r.overallProductCommission, 0);
-        const totalValue = extracomProducts.reduce((s, r) => s + r.purchaseValue, 0);
+        const totalItems = filteredProducts.length;
+        const totalCommission = filteredProducts.reduce((s, r) => s + r.overallProductCommission, 0);
+        const totalValue = filteredProducts.reduce((s, r) => s + r.purchaseValue, 0);
         const avgCommissionRate = totalItems > 0
-            ? extracomProducts.reduce((s, r) => s + r.totalCommissionRate, 0) / totalItems
+            ? filteredProducts.reduce((s, r) => s + r.totalCommissionRate, 0) / totalItems
             : 0;
 
         return { totalItems, totalCommission, totalValue, avgCommissionRate };
-    }, [extracomProducts]);
+    }, [filteredProducts]);
 
     // Goal progress calculation (multi-milestone)
     const goalProgress = useMemo(() => {
@@ -497,10 +600,18 @@ export default function ExtracomChecker() {
                         <Button
                             variant="secondary"
                             className="rounded-full gap-2 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 shadow-sm transition-all"
-                            onClick={() => {
+                            onClick={async () => {
                                 setRawRows([]);
                                 setMap(DEFAULT_KEYS);
-                                localStorage.removeItem("aff_raw_rows");
+                                // Delete from IndexedDB
+                                try {
+                                    const db = await openDB();
+                                    const tx = db.transaction(STORE_NAME, "readwrite");
+                                    const store = tx.objectStore(STORE_NAME);
+                                    store.delete("aff_raw_rows");
+                                } catch (e) {
+                                    console.error("Failed to delete from IndexedDB:", e);
+                                }
                             }}
                         >
                             <Sparkles className="w-4 h-4" />
@@ -628,28 +739,137 @@ export default function ExtracomChecker() {
                                     <div className="flex items-center gap-3">
                                         <Package className="w-6 h-6 text-blue-600 dark:text-blue-400" />
                                         <h2 className="text-xl font-bold text-slate-800 dark:text-white">
-                                            รายการสินค้า Extracom ({extracomProducts.length} รายการ)
+                                            รายการสินค้า Extracom ({filteredProducts.length} รายการ)
                                         </h2>
                                     </div>
 
-                                    {/* Search Bar */}
-                                    <div className="relative flex-1 max-w-md">
-                                        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
-                                        <Input
-                                            type="text"
-                                            placeholder="ค้นหาชื่อสินค้า..."
-                                            value={searchQuery}
-                                            onChange={(e) => setSearchQuery(e.target.value)}
-                                            className="pl-10 bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700"
-                                        />
-                                        {searchQuery && (
-                                            <Badge
-                                                variant="secondary"
-                                                className="absolute right-3 top-1/2 transform -translate-y-1/2 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300"
-                                            >
-                                                {filteredProducts.length} ผลลัพธ์
-                                            </Badge>
-                                        )}
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        {/* Channel Filter */}
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    className="rounded-lg gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                                                >
+                                                    <Filter className="w-4 h-4" />
+                                                    ช่องทาง
+                                                    {channelFilters.length > 0 && (
+                                                        <Badge className="ml-1 bg-blue-600 text-white">
+                                                            {channelFilters.length}
+                                                        </Badge>
+                                                    )}
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                                                <div className="space-y-2">
+                                                    {["Facebook", "Line", "Others", "Shopeevideo-Shopee"].map(channel => {
+                                                        const count = extracomProducts.filter(p => p.channel === channel).length;
+                                                        return (
+                                                            <label
+                                                                key={channel}
+                                                                className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={channelFilters.includes(channel)}
+                                                                    onChange={() => {
+                                                                        setChannelFilters(prev =>
+                                                                            prev.includes(channel)
+                                                                                ? prev.filter(c => c !== channel)
+                                                                                : [...prev, channel]
+                                                                        );
+                                                                    }}
+                                                                    className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                                                />
+                                                                <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                                                    {channel}
+                                                                </span>
+                                                                <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                                                    {count}
+                                                                </Badge>
+                                                            </label>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+
+                                        {/* Status Filter */}
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    className="rounded-lg gap-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-600"
+                                                >
+                                                    <Filter className="w-4 h-4" />
+                                                    สถานะสินค้า Affiliate
+                                                    {statusFilters.length > 0 && (
+                                                        <Badge className="ml-1 bg-blue-600 text-white">
+                                                            {statusFilters.length}
+                                                        </Badge>
+                                                    )}
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent className="w-64 p-3 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700">
+                                                <div className="space-y-2">
+                                                    {["รอดำเนินการ", "สำเร็จ"].map(status => {
+                                                        const count = extracomProducts.filter(p => {
+                                                            const orderStatus = p.orderStatus;
+                                                            if (status === "ยกเลิก") return orderStatus.includes("ยกเลิก");
+                                                            if (status === "ยังไม่ชำระเงิน") return orderStatus.includes("ยังไม่ชำระเงิน");
+                                                            if (status === "รอดำเนินการ") return orderStatus.includes("รอดำเนินการ");
+                                                            if (status === "สำเร็จ") return orderStatus.includes("สำเร็จ") || orderStatus.includes("สำเร็จแล้ว") || orderStatus.includes("สำเร็จสมบูรณ์");
+                                                            return false;
+                                                        }).length;
+                                                        return (
+                                                            <label
+                                                                key={status}
+                                                                className="flex items-center gap-3 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg cursor-pointer transition-colors"
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={statusFilters.includes(status)}
+                                                                    onChange={() => {
+                                                                        setStatusFilters(prev =>
+                                                                            prev.includes(status)
+                                                                                ? prev.filter(s => s !== status)
+                                                                                : [...prev, status]
+                                                                        );
+                                                                    }}
+                                                                    className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500"
+                                                                />
+                                                                <span className="flex-1 text-sm font-medium text-slate-700 dark:text-slate-300">
+                                                                    {status}
+                                                                </span>
+                                                                <Badge variant="secondary" className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                                                    {count}
+                                                                </Badge>
+                                                            </label>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+
+                                        {/* Search Bar */}
+                                        <div className="relative flex-1 min-w-[280px] max-w-md">
+                                            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                            <Input
+                                                type="text"
+                                                placeholder="ค้นหาชื่อสินค้า..."
+                                                value={searchQuery}
+                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                className="pl-10 bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700"
+                                            />
+                                            {searchQuery && (
+                                                <Badge
+                                                    variant="secondary"
+                                                    className="absolute right-3 top-1/2 transform -translate-y-1/2 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300"
+                                                >
+                                                    {filteredProducts.length} ผลลัพธ์
+                                                </Badge>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 
